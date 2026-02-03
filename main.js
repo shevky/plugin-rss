@@ -1,5 +1,7 @@
 import { i18n, plugin, format } from "@shevky/base";
 
+const PLUGIN_NAME = "shevky-rss";
+const PLUGIN_VERSION = "0.0.2";
 const FEED_FILENAME = "feed.xml";
 const FEED_TTL = 1440;
 const GENERATOR_NAME = "Shevky Static Site Generator";
@@ -53,6 +55,19 @@ const buildAlternateFeedLinks = (feedUrls, lang) =>
 
 class RssFeedBuilder {
   async build(ctx) {
+    const pluginConfig = ctx.config.get(PLUGIN_NAME) ?? {};
+    const feedFilename =
+      typeof pluginConfig.feedFilename === "string" &&
+      pluginConfig.feedFilename.trim().length > 0
+        ? pluginConfig.feedFilename.trim()
+        : FEED_FILENAME;
+    const feedTtl = Number.isFinite(pluginConfig.feedTtl)
+      ? pluginConfig.feedTtl
+      : FEED_TTL;
+    const feedItemCount = Number.isFinite(pluginConfig.feedItemCount)
+      ? pluginConfig.feedItemCount
+      : undefined;
+
     const entries = this._collectEntries(ctx.contentFiles ?? [], ctx);
     if (!entries.length) {
       return;
@@ -60,7 +75,7 @@ class RssFeedBuilder {
 
     const entriesByLang = this._groupEntriesByLang(entries);
     const languages = this._resolveLanguages();
-    const feedUrls = this._buildFeedUrls(languages, ctx);
+    const feedUrls = this._buildFeedUrls(languages, ctx, feedFilename);
 
     for (const lang of languages) {
       const langEntries = entriesByLang[lang] ?? [];
@@ -68,10 +83,27 @@ class RssFeedBuilder {
         continue;
       }
 
-      const channel = this._buildChannelMeta(lang, feedUrls, langEntries, ctx);
-      const itemsXml = this._renderItems(langEntries, ctx);
-      const rssXml = this._renderFeed(channel, itemsXml, ctx);
-      await this._writeFeed(ctx, lang, rssXml, langEntries.length);
+      const limitedEntries =
+        Number.isFinite(feedItemCount) && feedItemCount > 0
+          ? langEntries.slice(0, feedItemCount)
+          : langEntries;
+
+      const channel = this._buildChannelMeta(
+        lang,
+        feedUrls,
+        limitedEntries,
+        ctx,
+        feedFilename,
+      );
+      const itemsXml = this._renderItems(limitedEntries, ctx);
+      const rssXml = this._renderFeed(channel, itemsXml, ctx, feedTtl);
+      await this._writeFeed(
+        ctx,
+        lang,
+        rssXml,
+        limitedEntries.length,
+        feedFilename,
+      );
     }
   }
 
@@ -104,21 +136,21 @@ class RssFeedBuilder {
     return i18n.supported.length ? i18n.supported : [i18n.default];
   }
 
-  _buildFeedUrls(languages, ctx) {
+  _buildFeedUrls(languages, ctx, feedFilename) {
     return languages.reduce((acc, lang) => {
       const langConfig = getLangConfig(lang);
       const baseUrl = (langConfig?.canonical ?? ctx.config.identity.url) || "";
-      acc[lang] = `${normalizeBaseUrl(baseUrl)}${FEED_FILENAME}`;
+      acc[lang] = `${normalizeBaseUrl(baseUrl)}${feedFilename}`;
       return acc;
     }, /** @type {Record<string, string>} */ ({}));
   }
 
-  _buildChannelMeta(lang, feedUrls, entries, ctx) {
+  _buildChannelMeta(lang, feedUrls, entries, ctx, feedFilename) {
     const siteTitle = i18n.t(lang, "site.title", ctx.config.identity.author);
     const siteDescription = i18n.t(lang, "site.description", "");
     const langConfig = getLangConfig(lang);
     const channelLink = langConfig?.canonical ?? ctx.config.identity.url;
-    const selfFeedLink = feedUrls[lang] ?? `${channelLink}${FEED_FILENAME}`;
+    const selfFeedLink = feedUrls[lang] ?? `${channelLink}${feedFilename}`;
     const languageCulture = i18n.culture(lang) ?? lang;
     const languageCode = languageCulture.replace("_", "-");
     const lastBuildDate = rssDate(new Date());
@@ -193,7 +225,7 @@ class RssFeedBuilder {
     ]);
   }
 
-  _renderFeed(channel, itemsXml, ctx) {
+  _renderFeed(channel, itemsXml, ctx, feedTtl) {
     return [
       '<?xml version="1.0" encoding="UTF-8"?>',
       '<?xml-stylesheet type="text/xsl" href="/assets/rss.xsl"?>',
@@ -210,7 +242,7 @@ class RssFeedBuilder {
       `    <copyright>${escape(channel.copyright)}</copyright>`,
       `    <generator>${GENERATOR_NAME}</generator>`,
       `    <managingEditor>${ctx.config.identity.email} (${ctx.config.identity.author})</managingEditor>`,
-      `    <ttl>${FEED_TTL}</ttl>`,
+      `    <ttl>${feedTtl}</ttl>`,
       itemsXml,
       "  </channel>",
       "</rss>",
@@ -218,15 +250,15 @@ class RssFeedBuilder {
     ].join("\n");
   }
 
-  async _writeFeed(ctx, lang, rssXml, itemCount) {
+  async _writeFeed(ctx, lang, rssXml, itemCount, feedFilename) {
     const relativePath =
       lang === i18n.default
-        ? FEED_FILENAME
-        : ctx.path.combine(lang, FEED_FILENAME);
+        ? feedFilename
+        : ctx.path.combine(lang, feedFilename);
     const targetPath = ctx.path.combine(ctx.paths.dist, relativePath);
     await ctx.directory.create(ctx.path.name(targetPath));
     await ctx.file.write(targetPath, rssXml);
-    ctx.log.debug(`RSS '${lang}' feed has been created.`);
+    ctx.log.debug(`[${PLUGIN_NAME}] RSS '${lang}' feed has been created.`);
   }
 }
 
@@ -234,15 +266,10 @@ const rssBuilder = new RssFeedBuilder();
 
 /** @type {import("@shevky/base").PluginHooks} */
 const hooks = {
-  [plugin.hooks.CONTENT_LOAD]: async function (ctx) {
+  [plugin.hooks.CONTENT_READY]: async function (ctx) {
     await rssBuilder.build(ctx);
   },
 };
 
-const PLUGIN = {
-  name: "shevky-rss",
-  version: "0.0.1",
-  hooks,
-};
-
+const PLUGIN = { name: PLUGIN_NAME, version: PLUGIN_VERSION, hooks };
 export default PLUGIN;
